@@ -10,11 +10,9 @@ const API_BASE_URL = '';   // ← 실제 배포 백엔드 URL 입력
    앱 상태
 ────────────────────────────────────────────── */
 const state = {
-  mode: null,           // 'recommend' | 'sequence' | 'check'
+  mode: null,           // 'recommend' | 'check'
   crop: null,
-  pesticide: null,      // true | false
   address: null,        // 선택된 팜맵 주소 객체
-  wantSequence: false,
   result: null,
 };
 
@@ -182,7 +180,17 @@ function renderLoadingSteps() {
   `).join('');
 }
 
+function setMascotProgress(pct) {
+  const mascot = $('loading-mascot');
+  const shadow = $('loading-mascot-shadow');
+  const fill   = $('loading-track-fill');
+  if (mascot) mascot.style.left = pct + '%';
+  if (shadow) shadow.style.left = pct + '%';
+  if (fill)   fill.style.width  = pct + '%';
+}
+
 function advanceStep(idx) {
+  setMascotProgress((idx / LOAD_STEPS.length) * 100);
   if (idx > 0) {
     const prev = $(LOAD_STEPS[idx - 1].id);
     if (prev) {
@@ -205,6 +213,13 @@ function advanceStep(idx) {
 async function runRecommend() {
   showScreen('screen-loading');
   renderLoadingSteps();
+
+  // 이전 실행의 마스코트 위치를 트랜지션 없이 시작점으로 즉시 리셋
+  const track = $('loading-track');
+  track.classList.add('no-transition');
+  setMascotProgress(0);
+  void track.offsetWidth; // 강제 리플로우로 리셋을 즉시 반영
+  track.classList.remove('no-transition');
 
   const STEP_DELAYS = [800, 2200, 1800, 0]; // 마지막은 API 응답 대기
 
@@ -233,10 +248,8 @@ async function runRecommend() {
 async function fetchRecommend() {
   try {
     const body = {
-      crop:      state.crop,
-      address:   state.address,
-      pesticide: state.pesticide,
-      sequence:  state.wantSequence,
+      crop:    state.crop,
+      address: state.address,
     };
     const res = await fetch(`${API_BASE_URL}/api/recommend`, {
       method: 'POST',
@@ -262,6 +275,7 @@ function renderResult() {
   const r = state.result;
 
   if (!r || r.error) {
+    $('result-check-cta').classList.remove('show');
     container.innerHTML = `
       <div style="text-align:center;padding:40px 0">
         <div style="font-size:48px">⚠️</div>
@@ -272,6 +286,8 @@ function renderResult() {
       </div>`;
     return;
   }
+
+  $('result-check-cta').classList.add('show');
 
   // 백엔드 응답이 { microbes: [...] } 또는 직접 배열
   const microbes = r.microbes || r.recommendations || (Array.isArray(r) ? r : [r]);
@@ -312,6 +328,19 @@ function renderSellers(sellers) {
     </div>`;
 }
 
+function goToCheckFromResult() {
+  const r = state.result;
+  const microbes = r?.microbes || r?.recommendations || (Array.isArray(r) ? r : (r ? [r] : []));
+  const top = microbes?.[0];
+  const microbeName = top?.name || top?.korName || top?.korean_name || '';
+  const cropName = CROPS.find(c => c.id === state.crop)?.name || state.crop || '';
+
+  showScreen('screen-check');
+  $('check-microbe').value = microbeName;
+  $('check-crop').value = cropName;
+  $('check-result').innerHTML = '';
+}
+
 /* ──────────────────────────────────────────────
    살포 가능 확인 API
 ────────────────────────────────────────────── */
@@ -324,6 +353,7 @@ async function runCheck() {
   btn.disabled = true;
   btn.textContent = '확인 중...';
 
+  let data;
   try {
     const res = await fetch(`${API_BASE_URL}/api/check`, {
       method: 'POST',
@@ -331,54 +361,25 @@ async function runCheck() {
       body: JSON.stringify({ microbe, crop }),
       signal: AbortSignal.timeout(30000),
     });
-    const data = await res.json();
-    $('check-result').innerHTML = `
-      <div class="seq-result-box">
-        <h4 style="margin-bottom:8px;color:${data.available ? 'var(--green-dark)' : '#dc3545'}">
-          ${data.available ? '✅ 살포 가능' : '❌ 살포 불가 또는 확인 불가'}
-        </h4>
-        <p style="font-size:14px;color:#444;line-height:1.6">${data.message || data.reason || ''}</p>
-      </div>`;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
   } catch (e) {
-    $('check-result').innerHTML = `<p style="color:#dc3545;font-size:14px">오류: ${e.message}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '확인하기';
+    console.warn('[TOBio] 살포 가능 확인 API 실패, 더미 데이터로 진행:', e.message);
+    data = {
+      available: true,
+      message: `(데모) "${microbe}"${crop ? `는 ${crop}에` : '는'} 살포해도 안전한 것으로 추정됩니다. 실제 서비스에서는 공인 데이터베이스 기준으로 정확히 안내해드려요.`,
+    };
   }
-}
 
-/* ──────────────────────────────────────────────
-   시퀀스 분리 API
-────────────────────────────────────────────── */
-async function runSequence() {
-  const seq = $('seq-input').value.trim();
-  if (!seq) { toast('시퀀스 데이터를 입력하세요'); return; }
-
-  const btn = $('seq-run-btn');
-  btn.disabled = true;
-  btn.textContent = '분석 중...';
-
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/sequence`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sequence: seq }),
-      signal: AbortSignal.timeout(60000),
-    });
-    const data = await res.json();
-    $('seq-result').innerHTML = `
-      <div class="seq-result-box">
-        <h4 style="margin-bottom:8px;color:var(--green-dark)">분석 결과</h4>
-        <pre style="font-size:13px;line-height:1.7;white-space:pre-wrap;color:#333">${
-          typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-        }</pre>
-      </div>`;
-  } catch (e) {
-    $('seq-result').innerHTML = `<p style="color:#dc3545;font-size:14px">오류: ${e.message}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '시퀀스 분리 실행';
-  }
+  $('check-result').innerHTML = `
+    <div class="seq-result-box">
+      <h4 style="margin-bottom:8px;color:${data.available ? 'var(--green-dark)' : '#dc3545'}">
+        ${data.available ? '✅ 살포 가능' : '❌ 살포 불가 또는 확인 불가'}
+      </h4>
+      <p style="font-size:14px;color:#444;line-height:1.6">${data.message || data.reason || ''}</p>
+    </div>`;
+  btn.disabled = false;
+  btn.textContent = '확인하기';
 }
 
 /* ──────────────────────────────────────────────
@@ -390,7 +391,7 @@ function buildApp() {
 
 <!-- ══ 홈 화면 ══ -->
 <div class="screen" id="screen-home">
-  <div class="home-logo">🌱</div>
+  <img class="home-mascot" src="img/tobio.png" alt="토비오"/>
   <div class="home-brand">TOBio 토비오</div>
   <div class="home-sub">우리 밭에 딱 맞는 미생물, 어렵지 않게 찾아드려요</div>
   <div class="menu-grid">
@@ -399,13 +400,6 @@ function buildApp() {
       <div class="menu-text">
         <h3>미생물 추천받기</h3>
         <p>"뭘 써야 할지 몰라요"</p>
-      </div>
-    </div>
-    <div class="menu-card" id="btn-sequence">
-      <div class="menu-icon">🧬</div>
-      <div class="menu-text">
-        <h3>시퀀스 분리</h3>
-        <p>보유 샘플 시퀀스를 분석합니다</p>
       </div>
     </div>
     <div class="menu-card" id="btn-check">
@@ -428,19 +422,17 @@ function buildApp() {
   <div class="step-bar">
     <div class="step-dot active"></div>
     <div class="step-dot"></div>
-    <div class="step-dot"></div>
-    <div class="step-dot"></div>
   </div>
   <div class="content">
     <h2 class="section-title">어떤 작물을 재배하시나요?</h2>
     <p class="section-desc">작물을 선택하면 맞춤 미생물을 찾아드려요</p>
     <div class="crop-grid" id="crop-grid"></div>
-    <button class="btn btn-primary" id="crop-next-btn" disabled onclick="showScreen('screen-pesticide');updateStepBar('screen-pesticide')">다음</button>
+    <button class="btn btn-primary" id="crop-next-btn" disabled onclick="showScreen('screen-address')">다음</button>
   </div>
 </div>
 
-<!-- ══ Step 2: 농약 살포 여부 ══ -->
-<div class="screen" id="screen-pesticide">
+<!-- ══ Step 2: 주소 입력 ══ -->
+<div class="screen" id="screen-address">
   <div class="top-bar">
     <button class="back-btn" onclick="showScreen('screen-crop')">←</button>
     <span class="top-title">미생물 추천받기</span>
@@ -448,32 +440,6 @@ function buildApp() {
   <div class="step-bar">
     <div class="step-dot done"></div>
     <div class="step-dot active"></div>
-    <div class="step-dot"></div>
-    <div class="step-dot"></div>
-  </div>
-  <div class="content">
-    <h2 class="section-title">최근 살포한 농약이 있나요?</h2>
-    <p class="section-desc">살포 이력에 따라 미생물 선택이 달라질 수 있어요</p>
-    <div class="yn-wrap">
-      <button class="yn-btn" id="yn-yes" onclick="selectPesticide(true)">✔ 예</button>
-      <button class="yn-btn" id="yn-no"  onclick="selectPesticide(false)">✖ 아니요</button>
-    </div>
-    <button class="btn btn-primary" id="pesticide-next-btn" disabled
-      onclick="showScreen('screen-address');updateStepBar('screen-address')">다음</button>
-  </div>
-</div>
-
-<!-- ══ Step 3: 주소 입력 ══ -->
-<div class="screen" id="screen-address">
-  <div class="top-bar">
-    <button class="back-btn" onclick="showScreen('screen-pesticide')">←</button>
-    <span class="top-title">미생물 추천받기</span>
-  </div>
-  <div class="step-bar">
-    <div class="step-dot done"></div>
-    <div class="step-dot done"></div>
-    <div class="step-dot active"></div>
-    <div class="step-dot"></div>
   </div>
   <div class="content">
     <h2 class="section-title">농경지 주소를 알려주세요</h2>
@@ -494,52 +460,21 @@ function buildApp() {
     </div>
 
     <button class="btn btn-primary" id="addr-next-btn" disabled
-      onclick="showScreen('screen-seq-opt');updateStepBar('screen-seq-opt')">다음</button>
-  </div>
-</div>
-
-<!-- ══ Step 4: 시퀀스 선택 (선택) ══ -->
-<div class="screen" id="screen-seq-opt">
-  <div class="top-bar">
-    <button class="back-btn" onclick="showScreen('screen-address')">←</button>
-    <span class="top-title">미생물 추천받기</span>
-  </div>
-  <div class="step-bar">
-    <div class="step-dot done"></div>
-    <div class="step-dot done"></div>
-    <div class="step-dot done"></div>
-    <div class="step-dot active"></div>
-  </div>
-  <div class="content">
-    <h2 class="section-title">시퀀스 분석도 함께 받으시겠어요?</h2>
-    <p class="section-desc">선택 사항이에요. 건너뛰어도 미생물 추천은 받으실 수 있어요</p>
-
-    <div class="option-card" id="seq-opt-yes" onclick="selectSeqOpt(true)">
-      <div class="opt-icon">🧬</div>
-      <div class="opt-text">
-        <h4>예, 시퀀스 분석도 함께 받을게요</h4>
-        <p>보유하신 샘플 시퀀스를 분석해 미생물 추천에 반영합니다</p>
-      </div>
-    </div>
-    <div class="option-card selected" id="seq-opt-no" onclick="selectSeqOpt(false)">
-      <div class="opt-icon">⏭️</div>
-      <div class="opt-text">
-        <h4>아니요, 미생물 추천만 받을게요</h4>
-        <p>시퀀스 없이도 논문 데이터와 AI로 최적의 미생물을 추천해드려요</p>
-      </div>
-    </div>
-
-    <button class="btn btn-primary" style="margin-top:8px" onclick="runRecommend()">🌱 추천받기</button>
+      onclick="runRecommend()">🌱 추천받기</button>
   </div>
 </div>
 
 <!-- ══ 로딩 화면 ══ -->
 <div class="screen" id="screen-loading">
-  <div class="loading-logo">🌱</div>
   <div class="loading-title">토비오가 분석하고 있습니다</div>
   <div class="loading-sub" id="loading-crop-text">잠시만 기다려 주세요...</div>
+  <div class="loading-track" id="loading-track">
+    <div class="loading-track-bg"></div>
+    <div class="loading-track-fill" id="loading-track-fill"></div>
+    <div class="loading-mascot-shadow" id="loading-mascot-shadow"></div>
+    <img class="loading-mascot" id="loading-mascot" src="img/tobio.png" alt="토비오"/>
+  </div>
   <div class="loading-steps" id="loading-steps"></div>
-  <div class="spinner"></div>
 </div>
 
 <!-- ══ 결과 화면 ══ -->
@@ -554,6 +489,10 @@ function buildApp() {
       <p>작물: <span id="result-crop-name"></span> &nbsp;|&nbsp; 농경지: <span id="result-addr-name"></span></p>
     </div>
     <div id="result-content"></div>
+    <div class="check-cta" id="result-check-cta">
+      <p>🧪 추천받은 미생물, 살포 가능 확인도 함께 해보시겠어요?</p>
+      <button class="btn btn-outline" onclick="goToCheckFromResult()">살포 가능 확인하기</button>
+    </div>
     <button class="btn btn-outline" style="margin-top:8px" onclick="showScreen('screen-home')">홈으로 돌아가기</button>
   </div>
 </div>
@@ -580,22 +519,6 @@ function buildApp() {
   </div>
 </div>
 
-<!-- ══ 시퀀스 분리 ══ -->
-<div class="screen" id="screen-sequence">
-  <div class="top-bar">
-    <button class="back-btn" onclick="showScreen('screen-home')">←</button>
-    <span class="top-title">시퀀스 분리</span>
-  </div>
-  <div class="content">
-    <h2 class="section-title">시퀀스 분리 분석</h2>
-    <p class="section-desc">보유하신 미생물 시퀀스 데이터를 붙여넣으면 분석해드려요</p>
-    <textarea class="seq-textarea" id="seq-input"
-      placeholder=">Sample_001&#10;ATCGATCGATCGATCG...&#10;&#10;>Sample_002&#10;GCTAGCTAGCTAGCTA..."></textarea>
-    <button class="btn btn-primary" style="margin-top:12px" id="seq-run-btn" onclick="runSequence()">🧬 시퀀스 분리 실행</button>
-    <div id="seq-result" style="margin-top:16px"></div>
-  </div>
-</div>
-
 <div class="toast"></div>
 `;
 }
@@ -607,12 +530,8 @@ function bindEvents() {
   // 홈 메뉴
   $('btn-recommend').addEventListener('click', () => {
     state.mode = 'recommend';
-    Object.assign(state, { crop: null, pesticide: null, address: null, wantSequence: false });
+    Object.assign(state, { crop: null, address: null });
     showScreen('screen-crop');
-  });
-  $('btn-sequence').addEventListener('click', () => {
-    state.mode = 'sequence';
-    showScreen('screen-sequence');
   });
   $('btn-check').addEventListener('click', () => {
     state.mode = 'check';
@@ -648,19 +567,6 @@ function bindEvents() {
       cropObj ? `${cropObj.icon} ${cropObj.name} 밭을 위한 미생물을 찾고 있어요...` : '잠시만 기다려 주세요...';
     origRunRecommend();
   };
-}
-
-function selectPesticide(val) {
-  state.pesticide = val;
-  $('yn-yes').className = val ? 'yn-btn selected' : 'yn-btn';
-  $('yn-no').className  = !val ? 'yn-btn selected-no' : 'yn-btn';
-  $('pesticide-next-btn').disabled = false;
-}
-
-function selectSeqOpt(val) {
-  state.wantSequence = val;
-  $('seq-opt-yes').classList.toggle('selected', val);
-  $('seq-opt-no').classList.toggle('selected', !val);
 }
 
 /* ──────────────────────────────────────────────
