@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>미생물 추천: 도로명 주소 입력</title>
+    <!-- Tailwind CSS (디자인용) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 농업기상 관측지점 좌표 목록 (backend/scripts/buildAgriStations.js로 생성됨) -->
+    <script src="js/agriStations.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen p-6 font-sans">
+    <div class="max-w-md mx-auto bg-white rounded-xl shadow-lg p-8">
+        <h1 class="text-2xl font-bold text-green-700 mb-6">🌱 내 농경지 정보 입력</h1>
+        
+        <!-- 1. 농경지 주소 입력 (도로명 또는 지번, 직접 입력) -->
+        <div class="mb-5">
+            <label class="block text-sm font-semibold text-gray-700 mb-2">농경지 주소 (도로명 또는 지번)</label>
+            <input type="text" id="addressInput" placeholder="예: 전라남도 화순군 도암면 왕정리 441-3"
+                   class="w-full px-4 py-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-green-500">
+            <p class="text-xs text-gray-500 mt-2">정확한 날씨와 흙토람 토양 데이터를 불러오기 위해 필요합니다.</p>
+        </div>
+
+        <!-- 2. 작물 선택 -->
+        <div class="mb-5">
+            <label class="block text-sm font-semibold text-gray-700 mb-2">키우는 작물</label>
+            <select id="cropInput" class="w-full px-4 py-3 border border-gray-300 rounded-lg outline-none">
+                <option value="tomato">🍅 토마토</option>
+                <option value="pepper">🌶️ 고추</option>
+                <option value="cucumber">🥒 오이</option>
+                <option value="lettuce">🥬 상추</option>
+                <option value="wheat">🌾 밀</option>
+                <option value="maize">🌽 옥수수</option>
+                <option value="soybean">🫘 대두</option>
+                <option value="potato">🥔 감자</option>
+                <option value="cabbage">🥬 배추</option>
+            </select>
+        </div>
+
+        <!-- 3. 추천 버튼 -->
+        <button onclick="submitRecommendWithAddress()" id="submitBtn"
+                class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200">
+            데이터 수집 및 미생물 추천받기
+        </button>
+
+        <!-- 진행 상태 표시 -->
+        <div id="statusMsg" class="mt-4 text-sm font-medium text-blue-600 text-center hidden">
+            데이터를 불러오는 중입니다...
+        </div>
+    </div>
+
+    <script>
+        // ==============================================================
+        // 🔑 1. 카카오 REST API 키
+        // ==============================================================
+        const KAKAO_REST_API_KEY = "55d142d5c6499fe88b3a4274d20217e5"; 
+
+        // ==============================================================
+        // 🗺️ 2. 거리 계산 (위경도 기반)
+        // ==============================================================
+        function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+            const R = 6371; 
+            const dLat = (lat2 - lat1) * (Math.PI / 180);
+            const dLon = (lon2 - lon1) * (Math.PI / 180);
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c; 
+        }
+
+        // ==============================================================
+        // 🚀 3. 메인 실행 함수
+        // ==============================================================
+        async function submitRecommendWithAddress() {
+            const addressInput = document.getElementById("addressInput");
+            const address = addressInput.value.trim();
+            const crop = document.getElementById("cropInput").value;
+            const statusMsg = document.getElementById("statusMsg");
+            const submitBtn = document.getElementById("submitBtn");
+
+            // 값 검증
+            if (!address) {
+                alert("농경지 주소를 입력해주세요!");
+                return;
+            }
+
+            try {
+                // UI 상태 변경 (로딩 중)
+                submitBtn.disabled = true;
+                submitBtn.classList.add("opacity-50");
+                statusMsg.style.display = "block";
+                statusMsg.innerText = "1단계: 주소 좌표 변환 중...";
+
+                // 입력한 주소(도로명 또는 지번)를 카카오 주소 검색으로 좌표+법정동코드 변환
+                // (도로명주소가 없는 농지 지번도 지번 검색으로 정확히 매칭됩니다)
+                const kakaoUrl = `https://dapi.kakao.com/v2/local/search/address.json?query=${encodeURIComponent(address)}`;
+                const kakaoRes = await fetch(kakaoUrl, {
+                    headers: { "Authorization": `KakaoAK ${KAKAO_REST_API_KEY}` }
+                });
+
+                const kakaoData = await kakaoRes.json();
+                if (!kakaoData.documents) {
+                    throw new Error("카카오 주소 검색 API 오류: " + (kakaoData.message || "알 수 없는 오류"));
+                }
+                if (kakaoData.documents.length === 0) {
+                    throw new Error("주소를 찾을 수 없습니다. 다시 확인해주세요.");
+                }
+
+                const matched = kakaoData.documents[0];
+                const userLat = parseFloat(matched.y);
+                const userLng = parseFloat(matched.x);
+                const stdgCd = matched.address ? matched.address.b_code : "";
+
+                // [관측지점 매핑] 내 밭의 위경도로부터 농업기상 관측지점(215개) 중 가장 가까운 지점 매핑
+                let closestAgriStation = AGRI_STATIONS[0];
+                let minAgriDistance = Infinity;
+
+                AGRI_STATIONS.forEach(station => {
+                    const dist = getDistanceFromLatLonInKm(userLat, userLng, station.lat, station.lng);
+                    if (dist < minAgriDistance) {
+                        minAgriDistance = dist;
+                        closestAgriStation = station;
+                    }
+                });
+
+                const stationId = closestAgriStation.id;
+
+                // [시간 구하기]
+                const now = new Date();
+                const year = now.getFullYear();
+                const month = String(now.getMonth() + 1).padStart(2, '0');
+                const day = String(now.getDate()).padStart(2, '0');
+                const hour = String(now.getHours()).padStart(2, '0');
+                
+                const dateStr = `${year}${month}${day}`;
+                const timeStr = `${hour}00`; 
+
+                // [백엔드 통신]
+                statusMsg.innerText = "2단계: 기상·토양 데이터 수집 중...";
+
+                const backendBaseUrl = "https://microbe-recommend-website.onrender.com";
+                const backendUrl = `${backendBaseUrl}/api/getMergedData?stationId=${stationId}&lat=${userLat}&lng=${userLng}&stdgCd=${stdgCd}&dateStr=${dateStr}&timeStr=${timeStr}`;
+                
+                const backendRes = await fetch(backendUrl);
+                if (!backendRes.ok) throw new Error("공공데이터를 불러오는 중 백엔드 에러가 발생했습니다.");
+                
+                const finalMergedData = await backendRes.json();
+
+                // [농지 여부 확인] 팜맵(위성/항공영상)에 등록된 농경지 필지가 전혀 없으면
+                // (isFarmland === false) 농지가 아닌 주소이므로 추천을 진행하지 않음.
+                // null이면 그 자체 확인이 실패한 경우라 차단하지 않고 그대로 진행
+                if (finalMergedData.isFarmland === false) {
+                    throw new Error("입력하신 주소는 등록된 농경지(팜맵)가 아닙니다. 실제 농경지 주소를 입력해주세요.");
+                }
+
+                // [완료 처리 및 로컬 저장]
+                statusMsg.innerText = "✅ 수집 완료! 추천 결과를 분석합니다.";
+
+                localStorage.setItem("integratedSoilEnvironment", JSON.stringify(finalMergedData));
+                localStorage.setItem("userCrop", crop);
+                localStorage.setItem("userStdgCd", stdgCd);
+                localStorage.setItem("userAddress", address);
+
+                console.log("획득한 최종 데이터:", finalMergedData);
+
+                window.location.href = "a-1_recommend-result.html";
+                return;
+
+            } catch (error) {
+                console.error(error);
+                alert(error.message);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.classList.remove("opacity-50");
+                statusMsg.style.display = "none";
+            }
+        }
+    </script>
+</body>
+</html>
